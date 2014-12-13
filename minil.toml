@@ -1,0 +1,6 @@
+name = "App-SimpleChat"
+# badges = ["travis"]
+authority="cpan:HAYAJO"
+
+module_maker="ModuleBuildTiny"
+

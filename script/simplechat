@@ -1,0 +1,111 @@
+#!/usr/bin/env perl
+use Mojolicious::Lite;
+
+use Mojo::Redis2;
+use Encode qw/encode_utf8/;
+use Mojo::JSON qw/decode_json encode_json/;
+use Mojo::Util qw/xss_escape/;
+
+helper redis => sub {
+    $_[0]->stash->{redis} ||= Mojo::Redis2->new(
+        url => eval {
+            if( my $url = $ENV{REDIS_PORT_6379_TCP} || $ENV{REDISTOGO_URL} ) {
+                return Mojo::URL->new($url)->scheme('redis');
+            }
+            app->log->info('REDIS_PORT_6379_TCP or REDISTOGO_URL not set. use default Mojo::Redis2@url');
+            return undef;
+        },
+    );
+};
+
+websocket '/chat' => sub {
+    my $c = shift;
+
+    $c->inactivity_timeout(300);
+    my $chan = 'chan:chat';
+
+    my $sub = $c->redis->subscribe($chan);
+    $sub->on(
+        message => sub {
+            my( $redis, $message, $channel ) = @_;
+            my $data = decode_json($message);
+            $c->send( { json => +{ map { ( $_ => xss_escape( $data->{$_} ) ) } keys %{$data} } } );
+        }
+    );
+
+    $c->on(
+        message => sub {
+            my( $c, $message ) = @_;
+            my $data = decode_json( encode_utf8($message) );
+            if( $data->{ping} ) {
+                $c->redis->publish( "$chan:keepalive" => 1 );    # to keep redis session.
+                $c->send( { json => { pong => 1 } } );
+                return;
+            }
+            $c->redis->publish( $chan => encode_utf8($message) );
+        }
+    );
+    $c->on(
+        finish => sub {
+            my( $c, $code, $reason ) = @_;
+            delete $c->stash->{redis};
+        }
+    );
+};
+
+get '/' => sub {
+  my $c = shift;
+  $c->render('index');
+};
+
+app->start;
+__DATA__
+
+@@ index.html.ep
+% layout 'default';
+% title 'Welcome';
+<h1>Simple Chat</h1>
+<div><input type="text" id="message"/></div>
+<div id="log"></div>
+<script>
+  var keepalive;
+  var ws = new WebSocket('<%= url_for('chat')->to_abs %>');
+  function log(msg) {
+    var p = document.createElement('p');
+    p.innerHTML = msg;
+    var log = document.getElementById('log');
+    log.insertBefore(p, log.firstChild);
+  }
+  ws.onmessage = function(e) {
+    var data = JSON.parse(e.data);
+    if (data.pong) {
+      console.log('receive pong');
+      return;
+    }
+    log(data.msg);
+  };
+  ws.onclose = function(e) {
+    clearInterval(keepalive);
+    ws = null;
+    log('connection closed by forign host.');
+  };
+  keepalive = window.setInterval( function () {
+    var msg = JSON.stringify({ 'ping': true });
+    console.log('send ping');
+    ws.send(msg);
+  }, 15000); // sends a ping every 15 seconds
+  document.getElementById('message').onkeydown = function(e) {
+    if (e.keyCode == 13 && e.currentTarget.value != '') {
+      var msg = JSON.stringify({'msg': e.currentTarget.value});
+      ws.send(msg);
+      e.currentTarget.value = '';
+     }
+  };
+</script>
+
+@@ layouts/default.html.ep
+<!DOCTYPE html>
+<html>
+  <head><title><%= title %></title></head>
+  <body><%= content %></body>
+</html>
